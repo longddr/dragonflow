@@ -15,11 +15,12 @@ from oslo_config import cfg
 from oslo_utils import importutils
 
 from neutron.common import config as common_config
-from neutron.tests import base
 from neutronclient.neutron import client
 
 from dragonflow.common import common_params
 from dragonflow.db import api_nb
+from dragonflow.tests import base
+
 
 cfg.CONF.register_opts(common_params.df_opts, 'df')
 
@@ -52,11 +53,12 @@ class DFTestBase(base.BaseTestCase):
             db_port=cfg.CONF.df.remote_db_port)
         self.__objects_to_close = []
 
-    def store(self, obj):
-        self.__objects_to_close.append(obj)
+    def store(self, obj, close_func=None):
+        close_func = close_func if close_func else obj.close
+        self.__objects_to_close.append(close_func)
         return obj
 
     def tearDown(self):
-        for obj in reversed(self.__objects_to_close):
-            obj.close()
+        for close_func in reversed(self.__objects_to_close):
+            close_func()
         super(DFTestBase, self).tearDown()

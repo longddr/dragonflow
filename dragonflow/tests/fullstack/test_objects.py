@@ -10,11 +10,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import netaddr
+
 import time
 
 from novaclient import client as novaclient
 
+from oslo_log import log
+
+from dragonflow._i18n import _LW
 from dragonflow.tests.fullstack import test_base
+
+LOG = log.getLogger(__name__)
 
 
 class RouterTestObj(object):
@@ -139,10 +146,11 @@ class NetworkTestObj(object):
 
 class VMTestObj(object):
 
-    def __init__(self, parent):
+    def __init__(self, parent, neutron):
         self.server = None
         self.closed = False
         self.parent = parent
+        self.neutron = neutron
         creds = test_base.credentials()
         auth_url = creds['auth_url'] + "/v2.0"
         self.nova = novaclient.Client('2', creds['username'],
@@ -153,15 +161,26 @@ class VMTestObj(object):
         self.parent.assertIsNotNone(image)
         flavor = self.nova.flavors.find(name="m1.tiny")
         self.parent.assertIsNotNone(flavor)
-        network = self.nova.networks.find(label='private')
+        network = self._find_first_network(name='private')
         self.parent.assertIsNotNone(network)
-        nics = [{'net-id': network.id}]
+        nics = [{'net-id': network['id']}]
         self.server = self.nova.servers.create(name='test', image=image.id,
                            flavor=flavor.id, nics=nics, user_data=script)
         self.parent.assertIsNotNone(self.server)
         server_is_ready = self._wait_for_server_ready(30)
         self.parent.assertTrue(server_is_ready)
         return self.server.id
+
+    def _find_first_network(self, **kwargs):
+        networks = self.neutron.list_networks(**kwargs)['networks']
+        networks_count = len(networks)
+        if networks_count == 0:
+            return None
+        if networks_count > 1:
+            message = _LW("More than one network (%(count)d) found matching: "
+                "%(args)s")
+            LOG.warning(message % {'args': kwargs, 'count': networks_count})
+        return networks[0]
 
     def _wait_for_server_ready(self, timeout):
         if self.server is None:
@@ -190,6 +209,15 @@ class VMTestObj(object):
 
     def dump(self):
         return self.nova.servers.get_console_output(self.server)
+
+    def get_first_ipv4(self):
+        if self.server is None:
+            return None
+        ips = self.server.networks['private']
+        for ip in ips:
+            if netaddr.IPAddress(ip).version == 4:
+                return ip
+        return None
 
 
 class SubnetTestObj(object):

@@ -117,7 +117,7 @@ class EtcdDbDriver(db_api.DbApi):
         except etcd.EtcdKeyNotFound:
             raise df_exceptions.DBKeyNotFound(key=key)
 
-    def get_all_entries(self, table):
+    def get_all_entries(self, table, topic=None):
         res = []
         try:
             directory = self.client.get("/" + table)
@@ -128,7 +128,7 @@ class EtcdDbDriver(db_api.DbApi):
                 res.append(entry.value)
         return res
 
-    def get_all_keys(self, table):
+    def get_all_keys(self, table, topic=None):
         res = []
         try:
             directory = self.client.get("/" + table)
@@ -179,10 +179,10 @@ class EtcdDbDriver(db_api.DbApi):
                                          timeout=5)
                 keys = entry.key.split('/')
                 self.notify_callback(keys[1], keys[2], entry.action,
-                                     entry.value)
+                                     entry.value, None)
                 self.current_key = entry.modifiedIndex + 1
             except Exception as e:
                 if "Read timed out" not in e.message:
                     LOG.warning(e)
                 self.notify_callback(None, None, 'sync',
-                                     None)
+                                     None, None)

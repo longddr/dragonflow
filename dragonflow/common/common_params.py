@@ -34,7 +34,9 @@ df_opts = [
                default='geneve',
                help=_('The encapsulation type for the tunnel')),
     cfg.StrOpt('apps_list',
-               default='l2_app.L2App,l3_app.L3App',
+               default='l2_app.L2App,'
+                       'l3_proactive_app.L3ProactiveApp,'
+                       'dhcp_app.DHCPApp',
                help=_('List of openflow applications classes to load')),
     cfg.BoolOpt('use_centralized_ipv6_DHCP',
                 default=False,
@@ -45,18 +47,34 @@ df_opts = [
     cfg.StrOpt('pub_sub_driver',
                default='zmq_pubsub_driver',
                help=_('Drivers to use for the Dragonflow pub/sub')),
+    cfg.StrOpt('pub_sub_multiproc_driver',
+               default='zmq_pubsub_multiproc_driver',
+               help=_('Drivers to use for the Dragonflow pub/sub')),
     cfg.ListOpt('publishers_ips',
                 default=['$local_ip'],
                 help=_('List of the Neutron Server Publisher IPs.')),
     cfg.PortOpt('publisher_port',
                 default=8866,
-                help=_('Neutron Server Publishers Port')),
-    cfg.BoolOpt('is_monitor_tables',
-                default='$enable_df_pub_sub',
-                help=_('Manually monitor Dragonflow database tables')),
-    cfg.ListOpt('monitor_tables',
-                default=['chassis'],
-                help=_('Monitor these tables for chages in DF database')),
+                help=_('Neutron Server Publishers port')),
+    cfg.StrOpt('publisher_transport',
+               default='tcp',
+               help=_('Neutron Server Publishers transport protocol')),
+    cfg.StrOpt('publisher_bind_address',
+               default='*',
+               help=_('Neutron Server Publishers bind address')),
+    cfg.BoolOpt(
+        'pub_sub_use_multiproc',
+        default=True,
+        help=_(
+            'Use inter-process publish/subscribe. '
+            'Publishers send events via the publisher service.'
+        )
+    ),
+    cfg.StrOpt(
+        'publisher_multiproc_socket',
+        default='/var/run/zmq_pubsub/zmq-publisher-socket',
+        help=_('Neutron Server Publisher inter-process socket address')
+    ),
     cfg.FloatOpt('monitor_table_poll_time',
                 default=30,
                 help=_('Poll monitored tables every this number of seconds')),

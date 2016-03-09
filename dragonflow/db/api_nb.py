@@ -25,7 +25,8 @@ from oslo_serialization import jsonutils
 from dragonflow._i18n import _LI
 from dragonflow.common import utils as df_utils
 from dragonflow.db.db_common import DbUpdate
-from dragonflow.db.pub_sub_api import TableMonitor
+from dragonflow.db import pub_sub_api
+
 eventlet.monkey_patch()
 
 LOG = log.getLogger(__name__)
@@ -47,38 +48,39 @@ class NbApi(object):
     def initialize(self, db_ip='127.0.0.1', db_port=4001):
         self.driver.initialize(db_ip, db_port, config=cfg.CONF.df)
         if self.use_pubsub:
-            pub_sub_driver = df_utils.load_driver(
-                                    cfg.CONF.df.pub_sub_driver,
-                                    df_utils.DF_PUBSUB_DRIVER_NAMESPACE)
-            self.publisher = pub_sub_driver.get_publisher()
-            self.subscriber = pub_sub_driver.get_subscriber()
+            self.publisher = self._get_publisher()
+            self.subscriber = self._get_subscriber()
             if self.is_neutron_server:
                 #Publisher is part of the neutron server Plugin
-                #TODO(gampel) Move plugin publish_port and
-                #controller port to conf settings
-                self._start_publisher()
+                self.publisher.initialize()
                 self._start_db_table_monitors()
             else:
                 #NOTE(gampel) we want to start queuing event as soon
                 #as possible
                 self._start_subsciber()
 
-    def _start_publisher(self, trasport_proto='tcp'):
-        endpoint = '*:%s' % cfg.CONF.df.publisher_port
-        self.publisher.initialize(
-                        endpoint=endpoint,
-                        trasport_proto=trasport_proto,
-                        config=cfg.CONF.df)
-        self.publisher.daemonize()
+    def _get_publisher(self):
+        if cfg.CONF.df.pub_sub_use_multiproc:
+            pubsub_driver_name = cfg.CONF.df.pub_sub_multiproc_driver
+        else:
+            pubsub_driver_name = cfg.CONF.df.pub_sub_driver
+        pub_sub_driver = df_utils.load_driver(
+                                    pubsub_driver_name,
+                                    df_utils.DF_PUBSUB_DRIVER_NAMESPACE)
+        return pub_sub_driver.get_publisher()
+
+    def _get_subscriber(self):
+        pub_sub_driver = df_utils.load_driver(
+                                    cfg.CONF.df.pub_sub_driver,
+                                    df_utils.DF_PUBSUB_DRIVER_NAMESPACE)
+        return pub_sub_driver.get_subscriber()
 
     def _start_db_table_monitors(self):
-        if not cfg.CONF.df.is_monitor_tables:
-            return
         self.db_table_monitors = [self._start_db_table_monitor(table_name)
-            for table_name in cfg.CONF.df.monitor_tables]
+            for table_name in pub_sub_api.MONITOR_TABLES]
 
     def _start_db_table_monitor(self, table_name):
-        table_monitor = TableMonitor(
+        table_monitor = pub_sub_api.TableMonitor(
             table_name,
             self.driver,
             self.publisher,
@@ -95,12 +97,15 @@ class NbApi(object):
         self.db_table_monitors = None
 
     def _start_subsciber(self):
-        self.subscriber.initialize(
-                        self.db_change_callback,
-                        config=cfg.CONF.df)
+        self.subscriber.initialize(self.db_change_callback)
+        # TODO(oanson) Move publishers_ips to DF DB.
         publishers_ips = cfg.CONF.df.publishers_ips
         for ip in publishers_ips:
-            uri = 'tcp://%s:%s' % (ip, cfg.CONF.df.publisher_port)
+            uri = '%s://%s:%s' % (
+                cfg.CONF.df.publisher_transport,
+                ip,
+                cfg.CONF.df.publisher_port
+            )
             self.subscriber.register_listen_address(uri)
         self.subscriber.daemonize()
 
@@ -126,8 +131,8 @@ class NbApi(object):
                 self.db_change_callback)
         self._read_db_changes_from_queue()
 
-    def db_change_callback(self, table, key, action, value):
-        update = DbUpdate(table, key, action, value)
+    def db_change_callback(self, table, key, action, value, topic):
+        update = DbUpdate(table, key, action, value, topic=topic)
         LOG.info(_LI("Pushing Update to Queue: %s"), update)
         self._queue.put(update)
         eventlet.sleep(0)
@@ -136,8 +141,7 @@ class NbApi(object):
         while True:
             if not self.db_apply_failed:
                 self.next_update = self._queue.get(block=True)
-                LOG.info(_LI("Event update: %s"),
-                        self.next_update)
+                LOG.debug("Event update: %s", self.next_update)
             try:
                 value = self.next_update.value
                 if not value and self.next_update.action != 'delete':
@@ -208,16 +212,17 @@ class NbApi(object):
     def sync(self):
         pass
 
-    def create_security_group(self, name, **columns):
+    def create_security_group(self, name, topic, **columns):
         secgroup = {}
         secgroup['name'] = name
+        secgroup['topic'] = topic
         for col, val in columns.items():
             secgroup[col] = val
         secgroup_json = jsonutils.dumps(secgroup)
         self.driver.create_key('secgroup', name, secgroup_json)
         self._send_db_change_event('secgroup', name, 'create', secgroup_json)
 
-    def delete_security_group(self, name):
+    def delete_security_group(self, name, topic):
         self.driver.delete_key('secgroup', name)
         self._send_db_change_event('secgroup', name, 'delete', name)
 
@@ -253,7 +258,7 @@ class NbApi(object):
 
     def get_all_chassis(self):
         res = []
-        for entry_value in self.driver.get_all_entries('chassis'):
+        for entry_value in self.driver.get_all_entries('chassis', None):
             res.append(Chassis(entry_value))
         return res
 
@@ -326,9 +331,9 @@ class NbApi(object):
         except Exception:
             return None
 
-    def get_all_logical_ports(self):
+    def get_all_logical_ports(self, topic=None):
         res = []
-        for lport_value in self.driver.get_all_entries('lport'):
+        for lport_value in self.driver.get_all_entries('lport', topic):
             lport = LogicalPort(lport_value)
             if lport.get_chassis() is None:
                 continue
@@ -430,21 +435,21 @@ class NbApi(object):
         self._send_db_change_event('lrouter', lrouter_name, 'set',
                                    lrouter_json)
 
-    def get_routers(self):
+    def get_routers(self, topic=None):
         res = []
-        for lrouter_value in self.driver.get_all_entries('lrouter'):
+        for lrouter_value in self.driver.get_all_entries('lrouter', topic):
             res.append(LogicalRouter(lrouter_value))
         return res
 
-    def get_security_groups(self):
+    def get_security_groups(self, topic=None):
         res = []
-        for secgroup_value in self.driver.get_all_entries('secgroup'):
+        for secgroup_value in self.driver.get_all_entries('secgroup', topic):
             res.append(SecurityGroup(secgroup_value))
         return res
 
-    def get_all_logical_switches(self):
+    def get_all_logical_switches(self, topic=None):
         res = []
-        for lswitch_value in self.driver.get_all_entries('lswitch'):
+        for lswitch_value in self.driver.get_all_entries('lswitch', topic):
             res.append(LogicalSwitch(lswitch_value))
         return res
 

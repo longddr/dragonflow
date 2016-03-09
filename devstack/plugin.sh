@@ -10,7 +10,7 @@ OVS_BRANCH=${OVS_BRANCH:-origin/branch-2.5}
 
 DEFAULT_NB_DRIVER_CLASS="dragonflow.db.drivers.etcd_db_driver.EtcdDbDriver"
 DEFAULT_TUNNEL_TYPE="geneve"
-DEFAULT_APPS_LIST="l2_app.L2App,l3_app.L3App,dhcp_app.DHCPApp"
+DEFAULT_APPS_LIST="l2_app.L2App,l3_proactive_app.L3ProactiveApp,dhcp_app.DHCPApp"
 
 # How to connect to the database storing the virtual topology.
 REMOTE_DB_IP=${REMOTE_DB_IP:-$HOST_IP}
@@ -43,6 +43,19 @@ fi
 if is_service_enabled df-zookeeper ; then
     source $DEST/dragonflow/devstack/zookeeper_driver
     NB_DRIVER_CLASS="dragonflow.db.drivers.zookeeper_db_driver.ZookeeperDbDriver"
+fi
+
+# Pub/Sub Service
+#----------------
+# To be called to initialise params common to all pubsub drivers
+function init_pubsub {
+    enable_service df-publisher-service
+    DF_PUB_SUB="True"
+}
+
+if is_service_enabled df-zmq-publisher-service ; then
+    init_pubsub
+    source $DEST/dragonflow/devstack/zmq_pubsub_driver
 fi
 
 # Dragonflow installation uses functions from these files
@@ -89,11 +102,10 @@ function configure_df_plugin {
         iniset $NEUTRON_CONF df local_ip "$HOST_IP"
         iniset $NEUTRON_CONF df tunnel_type "$TUNNEL_TYPE"
         iniset $NEUTRON_CONF df apps_list "$DF_APPS_LIST"
-        iniset $NEUTRON_CONF df is_monitor_tables "$DF_IS_MONITOR_TABLES"
-        iniset $NEUTRON_CONF df monitor_tables "$DF_MONITOR_TABLES"
         iniset $NEUTRON_CONF df monitor_table_poll_time "$DF_MONITOR_TABLE_POLL_TIME"
         iniset $NEUTRON_CONF df_l2_app l2_responder "$DF_L2_RESPONDER"
         iniset $NEUTRON_CONF df enable_df_pub_sub "$DF_PUB_SUB"
+        iniset $NEUTRON_CONF df pub_sub_use_multiproc "$DF_PUB_SUB_USE_MULTIPROC"
         iniset $NEUTRON_CONF df publishers_ips "$PUBLISHERS_HOSTS"
         iniset $NEUTRON_CONF DEFAULT advertise_mtu "True"
         iniset $NEUTRON_CONF DEFAULT core_plugin "$Q_PLUGIN_CLASS"
@@ -354,6 +366,17 @@ function verify_ryu_version {
     fi
 }
 
+function start_pubsub_service {
+    PUBLISHER_SERVICE=$DRAGONFLOW_DIR/dragonflow/controller/df_publisher_service.py
+    set python $PUBLISHER_SERVICE
+    set "$@" --config-file $NEUTRON_CONF
+    run_process df-publisher-service "$*"
+}
+
+function stop_pubsub_service {
+    stop_process df-publisher-service
+}
+
 # main loop
 if [[ "$Q_ENABLE_DRAGONFLOW_LOCAL_CONTROLLER" == "True" ]]; then
     if [[ "$1" == "stack" && "$2" == "install" ]]; then
@@ -370,11 +393,23 @@ if [[ "$Q_ENABLE_DRAGONFLOW_LOCAL_CONTROLLER" == "True" ]]; then
         disable_libvirt_apparmor
     elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
         configure_df_plugin
+        if [[ "$DF_PUB_SUB" == "True" ]]; then
+            # Implemented by the pub/sub plugin
+            configure_pubsub_service_plugin
+            # Defaults, in case no Pub/Sub service was selected
+            if [ -z $PUB_SUB_DRIVER ]; then
+                die $LINENO "pub-sub enabled, but no pub-sub driver selected"
+            fi
+            PUB_SUB_MULTIPROC_DRIVER=${PUB_SUB_MULTIPROC_DRIVER:-$PUB_SUB_DRIVER}
+        fi
 
         if is_service_enabled nova; then
             create_nova_conf_neutron
         fi
 
+        if is_service_enabled df-publisher-service; then
+            start_pubsub_service
+        fi
         start_df
     fi
 
@@ -382,5 +417,8 @@ if [[ "$Q_ENABLE_DRAGONFLOW_LOCAL_CONTROLLER" == "True" ]]; then
         stop_df
         stop_ovs_dp
         cleanup_ovs
+        if [[ "$DF_PUB_SUB" == "True" ]]; then
+            stop_pubsub_service
+        fi
     fi
 fi
